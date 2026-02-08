@@ -17,6 +17,185 @@ This repository implements a complete data science workflow for the Home Credit 
 - ✅ **Data Quality**: Fixed anomalies, handled missing values
 - 🎯 **Production Ready**: Modular, documented, tested code
 
+---
+
+## 🔧 Data Preparation Script
+
+### What It Does
+
+**`feature_engineering.R`** is the main data preparation script that automates the entire feature engineering pipeline. It transforms raw Home Credit data into ML-ready features through a series of carefully designed transformations.
+
+**Core Functionality:**
+1. **Cleans Data**: Fixes DAYS_EMPLOYED anomaly, handles missing values, converts negative days to years
+2. **Engineers Features**: Creates 97 new features including financial ratios, interactions, and aggregations
+3. **Aggregates Data**: Combines 5 data sources (application, bureau, previous apps, installments) at applicant level
+4. **Ensures Consistency**: Applies identical transformations to train and test data (no data leakage)
+5. **Outputs Clean Data**: Saves processed CSV files ready for modeling
+
+### How It Is Used
+
+**Basic Usage (One Function Call):**
+```r
+# Load the script
+source("feature_engineering.R")
+
+# Run the complete pipeline
+results <- run_feature_engineering_pipeline(
+  data_dir = "path/to/home-credit-data",
+  save_output = TRUE
+)
+
+# Access processed data
+train <- results$train
+test <- results$test
+```
+
+**Step-by-Step Usage (Modular):**
+```r
+# 1. Load application data
+app_train <- fread("application_train.csv")
+app_test <- fread("application_test.csv")
+
+# 2. Apply feature engineering
+train <- clean_and_engineer_features(app_train)
+train <- add_advanced_features(train)
+
+# 3. Aggregate supplementary data
+bureau <- fread("bureau.csv")
+bureau_agg <- aggregate_bureau_features(bureau)
+
+# 4. Join features
+train <- merge(train, bureau_agg, by = "SK_ID_CURR", all.x = TRUE)
+```
+
+### Input Requirements
+
+**Required Data Files:**
+```
+data_directory/
+├── application_train.csv          # Main training data (307,511 rows)
+├── application_test.csv           # Main test data (48,744 rows)
+├── bureau.csv                     # Credit bureau data (1.7M rows)
+├── previous_application.csv       # Previous applications (1.7M rows)
+└── installments_payments.csv      # Payment history (13.6M rows)
+```
+
+**File Specifications:**
+- **application_train.csv**: 307,511 applicants × 122 features + TARGET variable
+- **application_test.csv**: 48,744 applicants × 121 features (no TARGET)
+- **bureau.csv**: Credit history records from other financial institutions
+- **previous_application.csv**: Previous Home Credit applications
+- **installments_payments.csv**: Repayment history for previous credits
+
+**Download Data:**
+```r
+# Download from Kaggle:
+# https://www.kaggle.com/c/home-credit-default-risk/data
+```
+
+### Output Description
+
+**Processed Data Files:**
+```
+output_directory/
+├── application_train_processed.csv    # 307,511 × 219 features (337 MB)
+└── application_test_processed.csv     # 48,744 × 218 features (55 MB)
+```
+
+**Output Features:**
+- **Original Features**: 122 (train) / 121 (test)
+- **New Features**: 97 engineered features
+- **Total Features**: 219 (train) / 218 (test)
+- **TARGET**: Only in training data (0 = repaid, 1 = default)
+
+**Feature Categories in Output:**
+1. **Demographic** (4): AGE_YEARS, EMPLOYED_YEARS, etc.
+2. **Financial Ratios** (10): CREDIT_INCOME_RATIO, PAYMENT_BURDEN, etc.
+3. **Missing Indicators** (8): EXT_SOURCE_1_MISSING, etc.
+4. **Interactions** (6): AGE_INCOME_INTERACTION, EXT_SOURCE_MEAN, etc.
+5. **Binned Variables** (3): AGE_GROUP, INCOME_BIN, CREDIT_BIN
+6. **Bureau Features** (23): BUREAU_ACTIVE_RATIO, BUREAU_DEBT_CREDIT_RATIO, etc.
+7. **Previous App Features** (24): PREV_APPROVAL_RATE, PREV_REFUSAL_RATE, etc.
+8. **Installment Features** (17): INSTALL_LATE_RATE, INSTALL_PAYMENT_RATIO, etc.
+9. **Aggregates** (1): TOTAL_DOCUMENTS
+10. **Plus all original features**
+
+**Return Object (when save_output = FALSE):**
+```r
+results <- list(
+  train = data.table,           # Processed training data
+  test = data.table,            # Processed test data
+  bureau_agg = data.table,      # Aggregated bureau features
+  prev_agg = data.table,        # Aggregated previous app features
+  install_agg = data.table      # Aggregated installment features
+)
+```
+
+### Processing Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  DATA PREPARATION PIPELINE                  │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Input: Raw CSV Files                                       │
+│  ├── application_train.csv (122 features)                  │
+│  ├── application_test.csv (121 features)                   │
+│  ├── bureau.csv (1.7M rows)                                │
+│  ├── previous_application.csv (1.7M rows)                  │
+│  └── installments_payments.csv (13.6M rows)                │
+│                                                             │
+│  ↓                                                          │
+│                                                             │
+│  Step 1: Fix Data Quality Issues                           │
+│  ├── DAYS_EMPLOYED anomaly → NA + indicator                │
+│  ├── Convert negative days → positive years                │
+│  └── Identify missing patterns                             │
+│                                                             │
+│  ↓                                                          │
+│                                                             │
+│  Step 2: Engineer Application Features                     │
+│  ├── 4 demographic features                                │
+│  ├── 10 financial ratios                                   │
+│  ├── 8 missing indicators                                  │
+│  ├── 6 interaction terms                                   │
+│  ├── 3 binned variables                                    │
+│  └── 1 document aggregate                                  │
+│                                                             │
+│  ↓                                                          │
+│                                                             │
+│  Step 3: Aggregate Supplementary Data                      │
+│  ├── Bureau: 23 features (credit history)                  │
+│  ├── Previous apps: 24 features (application patterns)     │
+│  └── Installments: 17 features (payment behavior)          │
+│                                                             │
+│  ↓                                                          │
+│                                                             │
+│  Step 4: Join All Features                                 │
+│  └── Merge by SK_ID_CURR (applicant ID)                    │
+│                                                             │
+│  ↓                                                          │
+│                                                             │
+│  Output: ML-Ready Data                                      │
+│  ├── application_train_processed.csv (219 features)        │
+│  └── application_test_processed.csv (218 features)         │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Performance Metrics
+
+| Metric | Value |
+|--------|-------|
+| **Processing Time** | 3-4 minutes |
+| **Memory Required** | 4-6 GB RAM |
+| **Input Size** | ~3.5 GB (5 CSV files) |
+| **Output Size** | 392 MB (2 CSV files) |
+| **Features Created** | 97 new features |
+| **Data Reduction** | 89% size reduction with more features |
+
+---
+
 ## 📁 Repository Structure
 
 ```
@@ -40,44 +219,14 @@ home-credit-feature-engineering/
 └── ⚙️  .gitignore                       # Git configuration
 ```
 
-## 🔍 Exploratory Data Analysis
-
-**File:** `EDA_homecredit_short.qmd` (Quarto document)
-
-### Key Findings from EDA:
-- **Target Imbalance**: 8% default rate (class imbalance issue)
-- **DAYS_EMPLOYED Anomaly**: 365243 placeholder in 18% of records
-- **Missing Data**: EXT_SOURCE_1 (56.4%), EXT_SOURCE_3 (19.8%)
-- **Income Distribution**: Right-skewed with outliers
-- **Credit Amounts**: Wide range requiring log transformation
-- **Correlations**: External scores highly predictive
-
-### EDA Outputs:
-✓ Data structure summary  
-✓ Missing value heatmaps  
-✓ Target variable analysis  
-✓ Univariate distributions  
-✓ Bivariate relationships  
-✓ Correlation matrices  
-✓ Outlier detection  
-✓ Data quality recommendations  
-
-**To render the EDA:**
-```r
-library(quarto)
-quarto_render("EDA_homecredit_short.qmd")
-# Opens HTML report in browser
-```
-
 ## 🚀 Quick Start
 
 ### Prerequisites
 ```r
-# Install required packages
 install.packages(c("data.table", "dplyr", "ggplot2", "quarto"))
 ```
 
-### Basic Usage
+### Complete Workflow
 ```r
 # 1. Load the pipeline
 source("feature_engineering.R")
@@ -91,14 +240,33 @@ results <- run_feature_engineering_pipeline(data_dir, save_output = TRUE)
 # 4. Access processed data
 train <- results$train      # 307,511 × 219 features
 test <- results$test        # 48,744 × 218 features
-bureau_agg <- results$bureau_agg
-prev_agg <- results$prev_agg
-install_agg <- results$install_agg
 
-# 5. Check results
-dim(train)
-summary(train$TARGET)
-names(train) %>% grep("RATIO", ., value = TRUE)
+# 5. Verify output
+dim(train)                  # Check dimensions
+summary(train$TARGET)       # Check target distribution
+names(train) %>% tail(20)   # View new features
+
+# 6. Use for modeling
+# Now ready for XGBoost, LightGBM, Random Forest, etc.
+```
+
+## 🔍 Exploratory Data Analysis
+
+**File:** `EDA_homecredit_short.qmd` (Quarto document)
+
+### Key Findings from EDA:
+- **Target Imbalance**: 8% default rate (class imbalance issue)
+- **DAYS_EMPLOYED Anomaly**: 365243 placeholder in 18% of records
+- **Missing Data**: EXT_SOURCE_1 (56.4%), EXT_SOURCE_3 (19.8%)
+- **Income Distribution**: Right-skewed with outliers
+- **Credit Amounts**: Wide range requiring log transformation
+- **Correlations**: External scores highly predictive
+
+**To render the EDA:**
+```r
+library(quarto)
+quarto_render("EDA_homecredit_short.qmd")
+# Opens HTML report in browser
 ```
 
 ## 📈 Data Transformation Summary
@@ -108,15 +276,6 @@ names(train) %>% grep("RATIO", ., value = TRUE)
 | **Training**  | 122 cols | 219 cols  | +97           | +80%        |
 | **Test**      | 121 cols | 218 cols  | +97           | +80%        |
 | **Rows**      | 307,511  | 307,511   | No reduction  | Maintained  |
-
-### Processing Time
-- **EDA Rendering**: ~2-3 minutes
-- **Feature Engineering**: ~2-3 minutes  
-- **Total Pipeline**: ~5-6 minutes on standard hardware
-
-### Output Files
-- `application_train_processed.csv` (337 MB)
-- `application_test_processed.csv` (55 MB)
 
 ## 🔧 Engineered Features (97 Total)
 
@@ -139,254 +298,48 @@ names(train) %>% grep("RATIO", ., value = TRUE)
 - `ANNUITY_CREDIT_RATIO`: Payment structure
 
 ### 3. Credit History - Bureau Features (23)
-From `bureau.csv` aggregated to applicant level:
-- Credit counts (active, closed, sold)
-- Credit type diversity
-- Overdue amounts (mean, max, sum)
-- Debt amounts and ratios
-- Credit history timeline
-- Prolongation patterns
-- Debt-to-credit ratios
+- Credit counts, overdue amounts, debt ratios, credit history timeline
 
 ### 4. Application History (24)
-From `previous_application.csv`:
-- Application counts by status
-- Approval/refusal rates
-- Credit and application amounts
-- Down payment patterns
-- Days to decision statistics
-- Loan type distribution (cash/consumer/revolving)
+- Application counts by status, approval/refusal rates, credit amounts
 
 ### 5. Payment Behavior (17)
-From `installments_payments.csv`:
-- Late payment counts and rates
-- Payment differences (over/underpayment)
-- Days late statistics
-- Payment compliance ratios
-- Payment amount patterns
+- Late payment rates, payment differences, payment compliance ratios
 
 ### 6. Missing Value Indicators (8)
-- `EXT_SOURCE_1_MISSING`, `EXT_SOURCE_2_MISSING`, `EXT_SOURCE_3_MISSING`
-- `OWN_CAR_AGE_MISSING`, `AMT_GOODS_PRICE_MISSING`
-- `AMT_ANNUITY_MISSING`, `CNT_FAM_MEMBERS_MISSING`
-- `DAYS_LAST_PHONE_CHANGE_MISSING`
+- Flags for missing EXT_SOURCE, car age, goods price, etc.
 
 ### 7. Interaction Features (6)
-- `AGE_INCOME_INTERACTION`: Life-stage income
-- `EXT_SOURCE_MEAN`: Composite external score
-- `EXT_SOURCE_12_INTERACTION`, `EXT_SOURCE_23_INTERACTION`
-- `EDUCATION_INCOME_INTERACTION`
-- `OCCUPATION_INCOME_INTERACTION`
+- Age-income interactions, external score combinations
 
 ### 8. Binned Variables (3)
-- `AGE_GROUP`: 6 age brackets (18-25, 26-35, etc.)
-- `INCOME_BIN`: 5 income levels (Low to High)
-- `CREDIT_BIN`: 5 credit amount categories
-
-### 9. Aggregated Features (1)
-- `TOTAL_DOCUMENTS`: Sum of all document submission flags
+- Age groups, income bins, credit amount categories
 
 ## 🛠️ Data Quality Improvements
 
 | Issue | Impact | Solution |
 |-------|--------|----------|
 | **DAYS_EMPLOYED = 365243** | 18% of records | Replace with NA + create indicator flag |
-| **Negative day values** | All date columns | Convert to positive years for interpretability |
+| **Negative day values** | All date columns | Convert to positive years |
 | **Missing EXT_SOURCE_1** | 56.4% missing | Create missing indicators + composite score |
-| **Missing EXT_SOURCE_3** | 19.8% missing | Create missing indicators + mean imputation |
-| **Supplementary data** | Millions of rows | Aggregate to applicant level with 64 features |
-| **Infinite values** | In ratio calculations | Replace with NA for safe handling |
-
-## 💡 Complete Workflow Example
-
-```r
-# ============================================
-# COMPLETE DATA SCIENCE WORKFLOW
-# ============================================
-
-# Step 1: Exploratory Data Analysis
-# ----------------------------------
-library(quarto)
-quarto_render("EDA_homecredit_short.qmd")
-# Review HTML output for insights
-
-# Step 2: Feature Engineering
-# ----------------------------
-source("feature_engineering.R")
-data_dir <- "./data"
-results <- run_feature_engineering_pipeline(data_dir)
-
-# Step 3: Inspect Processed Data
-# -------------------------------
-train <- results$train
-test <- results$test
-
-# Check dimensions
-dim(train)  # 307511 × 219
-
-# Check target distribution
-table(train$TARGET)
-prop.table(table(train$TARGET))
-
-# View new features
-new_features <- c(
-  "CREDIT_INCOME_RATIO", "PAYMENT_BURDEN", 
-  "BUREAU_ACTIVE_RATIO", "PREV_APPROVAL_RATE",
-  "INSTALL_LATE_RATE", "EXT_SOURCE_MEAN"
-)
-summary(train[, ..new_features])
-
-# Step 4: Handle Remaining Missing Values (Optional)
-# --------------------------------------------------
-library(mice)
-train_imputed <- mice(train, method = "rf", m = 1)
-
-# Step 5: Prepare for Modeling
-# -----------------------------
-# Encode categorical variables
-# Scale numeric features
-# Split validation set
-# Train models (XGBoost, LightGBM, etc.)
-```
-
-## 🔄 Pipeline Functions
-
-The `feature_engineering.R` script contains 6 modular functions:
-
-### 1. `clean_and_engineer_features(df, is_train, train_stats)`
-- Fixes DAYS_EMPLOYED anomaly
-- Creates demographic features
-- Engineers 10 financial ratios
-
-### 2. `add_advanced_features(df)`
-- Creates missing value indicators
-- Builds interaction terms
-- Creates binned variables
-- Aggregates document flags
-
-### 3. `aggregate_bureau_features(bureau)`
-- Processes bureau credit history
-- Returns 23 aggregated features
-- Computes credit behavior metrics
-
-### 4. `aggregate_previous_applications(prev_app)`
-- Processes previous applications
-- Returns 24 aggregated features
-- Computes approval/refusal patterns
-
-### 5. `aggregate_installments(installments)`
-- Processes payment history
-- Returns 17 aggregated features
-- Computes late payment metrics
-
-### 6. `run_feature_engineering_pipeline(data_dir, save_output)`
-- Master function orchestrating entire pipeline
-- Loads all data sources
-- Applies all transformations
-- Joins aggregated features
-- Saves processed files
-
-## 📊 Performance Metrics
-
-### Memory Usage
-- **Peak RAM**: ~4-6 GB (during aggregations)
-- **Recommended**: 8 GB+ RAM
-
-### Processing Time (Standard laptop)
-- Bureau aggregation: ~40 seconds
-- Previous apps aggregation: ~45 seconds
-- Installments aggregation: ~11 seconds
-- Feature engineering: ~2-3 minutes
-- **Total**: ~3-4 minutes
-
-### Output Size
-- Training data: 337 MB
-- Test data: 55 MB
-- Total: ~392 MB
-
-## 🎓 Educational Value
-
-This project demonstrates:
-- ✅ Professional data science workflow
-- ✅ Comprehensive exploratory analysis
-- ✅ Feature engineering best practices
-- ✅ Data quality management
-- ✅ Code documentation and organization
-- ✅ Git version control
-- ✅ Reproducible research (Quarto)
-
-### Skills Demonstrated
-- R programming (data.table, dplyr)
-- Statistical analysis
-- Data visualization (ggplot2)
-- Feature engineering
-- Data aggregation at scale
-- Documentation writing
-- Version control (Git/GitHub)
+| **Supplementary data** | Millions of rows | Aggregate to applicant level (64 features) |
 
 ## 📚 Documentation
 
-| Document | Description | Lines |
-|----------|-------------|-------|
-| `README.md` | Project overview (this file) | 400+ |
-| `README_feature_engineering.md` | Detailed feature specs | 156 |
-| `QUICK_REFERENCE.md` | Quick commands | 195 |
-| `EDA_homecredit_short.qmd` | Analysis notebook | 1,003 |
+- **[README.md](README.md)**: Project overview and script introduction (this file)
+- **[README_feature_engineering.md](README_feature_engineering.md)**: Detailed feature specifications
+- **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)**: Quick commands and examples
+- **[EDA_homecredit_short.qmd](EDA_homecredit_short.qmd)**: Complete exploratory analysis
 
-## 🤝 Use Cases
+## 🎓 Use Cases
 
-This pipeline is suitable for:
 - 📊 Credit default risk prediction
 - 💰 Loan approval modeling
 - 👥 Customer segmentation
 - 📈 Risk scoring systems
 - 🎓 Feature engineering education
-- 💼 Portfolio projects
-- 📝 Academic assignments
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Error: File not found**
-```r
-# Check data directory contents
-list.files(data_dir, pattern = "\.csv$")
-```
-
-**Error: Out of memory**
-```r
-# Clear workspace and garbage collect
-rm(list = setdiff(ls(), c("train", "test")))
-gc()
-
-# Or process files individually
-bureau_agg <- aggregate_bureau_features(bureau)
-rm(bureau); gc()
-```
-
-**Warning: Inf values in ratios**
-```r
-# Replace infinite values
-train <- train %>% 
-  mutate(across(where(is.numeric), ~na_if(., Inf))) %>%
-  mutate(across(where(is.numeric), ~na_if(., -Inf)))
-```
-
-## 🔮 Future Enhancements
-
-Potential improvements:
-- [ ] Add POS_CASH_balance aggregations
-- [ ] Add credit_card_balance features
-- [ ] Implement automated feature selection
-- [ ] Add cross-validation splits
-- [ ] Create model evaluation scripts
-- [ ] Build prediction pipeline
-- [ ] Add Shiny dashboard for visualization
 
 ## 📝 Citation
-
-If you use this code in your work, please cite:
 
 ```bibtex
 @misc{homecredit2026,
@@ -398,43 +351,19 @@ If you use this code in your work, please cite:
 }
 ```
 
-## 📄 License
-
-This project is created for educational purposes as part of IS6850 coursework.
-
-**Educational Use Only** - University of Arizona, Spring 2026
-
 ## 👤 Author
 
-**IS6850 Student**
-- University: University of Arizona
-- Course: IS6850 - Applied Data Science
-- Semester: Spring 2026
-- Date: February 2026
+**IS6850 Student** - University of Arizona, Spring 2026
 
 ## 🙏 Acknowledgments
 
-- **Home Credit Group** for the Kaggle competition dataset
-- **IS6850 Course Staff** for guidance and instruction
-- **R Community** for data.table, dplyr, and ggplot2
-- **Posit** for Quarto and RStudio
-- **Kaggle** for hosting the competition and data
-
-## 📞 Contact & Support
-
-- **Repository Issues**: Use GitHub Issues tab
-- **Questions**: Contact course instructor
-- **Contributions**: Fork and submit pull requests
+- Home Credit Group for the Kaggle competition dataset
+- IS6850 Course Staff for guidance
+- R Community for data.table, dplyr, and ggplot2
 
 ---
 
 **⭐ Star this repository if you find it helpful!**
 
-**🔗 Repository**: [github.com/YOUR_USERNAME/home-credit-feature-engineering](https://github.com/YOUR_USERNAME/home-credit-feature-engineering)
-
 **📅 Last Updated**: February 8, 2026
-
----
-
-*Built with ❤️ using R, data.table, and Quarto*
 
