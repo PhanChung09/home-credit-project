@@ -1,10 +1,42 @@
 # Home Credit Default Risk - Data Preparation Pipeline
 
-A comprehensive R-based data preparation and feature engineering pipeline for credit default risk prediction.
+A comprehensive R-based data preparation and feature engineering pipeline for credit default risk prediction, including exploratory data analysis.
 
 ## 📊 Project Overview
 
 This repository contains a production-ready data preparation script that transforms raw Home Credit application data into ML-ready features. The pipeline processes multiple data sources and creates 97 engineered features designed to improve credit default prediction models.
+
+## 📁 Repository Contents
+
+```
+├── README.md                          # This file
+├── EDA_homecredit_short.qmd          # Exploratory Data Analysis (Quarto)
+├── feature_engineering.R              # Main data preparation script
+├── README_feature_engineering.md      # Detailed feature documentation
+├── QUICK_REFERENCE.md                # Quick start guide
+└── .gitignore                        # Git ignore rules
+```
+
+## 🔍 Exploratory Data Analysis
+
+**File:** `EDA_homecredit_short.qmd`
+
+The EDA document provides:
+- **Data Quality Assessment**: Missing values, anomalies, outliers
+- **Distribution Analysis**: Univariate and bivariate distributions
+- **Key Findings**:
+  - DAYS_EMPLOYED anomaly (365243 in 18% of records)
+  - High missing rates in EXT_SOURCE_1 (56.4%)
+  - Target imbalance (8% default rate)
+  - Income and credit amount distributions
+- **Visualizations**: Histograms, box plots, correlation matrices
+- **Recommendations**: Guides feature engineering decisions
+
+To render the EDA:
+```r
+library(quarto)
+quarto_render("EDA_homecredit_short.qmd")
+```
 
 ## 🎯 Key Features
 
@@ -14,15 +46,6 @@ This repository contains a production-ready data preparation script that transfo
 - **Train/Test Consistency**: Ensures identical transformations for both datasets
 - **Modular Design**: 6 reusable functions for flexible workflows
 - **Well Documented**: Complete documentation and quick reference guides
-
-## 📁 Repository Contents
-
-```
-├── feature_engineering.R          # Main data preparation script (263 lines)
-├── README_feature_engineering.md  # Detailed documentation
-├── QUICK_REFERENCE.md            # Quick start guide
-└── .gitignore                    # Git ignore rules
-```
 
 ## 🚀 Quick Start
 
@@ -97,24 +120,28 @@ test <- results$test    # 48,744 × 218
 
 ## 📚 Documentation
 
-- **[README_feature_engineering.md](README_feature_engineering.md)**: Complete documentation with feature descriptions
+- **[EDA_homecredit_short.qmd](EDA_homecredit_short.qmd)**: Exploratory data analysis with visualizations
+- **[README_feature_engineering.md](README_feature_engineering.md)**: Complete feature documentation
 - **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)**: Quick start commands and common tasks
 
-## 💡 Example Workflow
+## 💡 Complete Workflow
 
 ```r
-# 1. Load and inspect
+# 1. Explore the data (optional)
+# Open and render EDA_homecredit_short.qmd in RStudio
+
+# 2. Load and process data
 source("feature_engineering.R")
 results <- run_feature_engineering_pipeline("./data")
 
-# 2. Check output
+# 3. Check output
 dim(results$train)  # 307511 × 219
 sum(is.na(results$train$TARGET))  # 0
 
-# 3. View key features
+# 4. View key features
 names(results$train) %>% grep("RATIO", ., value = TRUE)
 
-# 4. Save for modeling
+# 5. Save for modeling
 fwrite(results$train, "train_processed.csv")
 ```
 
@@ -163,6 +190,7 @@ Spring 2026
 - Home Credit Default Risk Kaggle Competition
 - IS6850 Data Science Course
 - R data.table and dplyr communities
+- Quarto for reproducible analysis
 
 ---
 
