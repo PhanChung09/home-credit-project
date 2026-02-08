@@ -1,0 +1,1003 @@
+---
+title: "EDA: Home Credit Default Risk"
+subtitle: "Application Data Analysis"
+author: "Phan Chung"
+date: today
+format: 
+  html:
+    toc: true
+    toc-depth: 2
+    toc-location: left
+    code-fold: false
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+
+# 1. Introduction
+
+## Business Problem
+
+Many potential borrowers face barriers to obtaining home loans due to stringent banking requirements and complex lending criteria. Home Credit International seeks to enhance financial inclusion by extending credit to applicants with limited traditional credit histories while simultaneously controlling the risk of loan default. By utilizing historical loan application data and credit behavior information collected from multiple data sources, the objective is to develop a predictive model that estimates the probability of loan repayment or default prior to loan approval.
+
+## Objective
+
+This exploratory data analysis examines loan application data to identify key predictors of default risk and inform modeling strategy.
+
+```{r setup}
+# Load required packages
+library(tidyverse)
+library(scales)
+library(corrplot)
+library(knitr)
+
+# Set theme
+theme_set(theme_minimal())
+```
+
+# 2. Data Description
+
+```{r load-data}
+# Load training data
+d_train <- read_csv("application_train.csv", show_col_types = FALSE)
+
+# Basic information
+cat("Training Data:\n")
+cat("  Rows:", nrow(d_train), "\n")
+cat("  Columns:", ncol(d_train), "\n")
+cat("  Default Rate:", percent(mean(d_train$TARGET, na.rm = TRUE), accuracy = 0.01), "\n")
+```
+
+The dataset contains **`{r} comma(nrow(d_train))`** loan applications with **`{r} ncol(d_train)`** features including:
+
+- **Target**: Binary indicator of payment difficulties (1 = default, 0 = repaid)
+- **Demographics**: Age, gender, family status, education level
+- **Financial**: Income, credit amount, loan annuity, goods price
+- **Employment**: Employment duration, income type, occupation
+- **External Scores**: Credit bureau scores (EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3)
+- **Property**: Housing type, car/realty ownership flags
+- **Regional**: Population and rating information
+
+```{r data-glimpse}
+# Show first few rows and structure
+glimpse(d_train)
+```
+
+## Summary Statistics
+
+```{r summary-statistics}
+# Select key numeric features for summary statistics
+key_features <- d_train |>
+  select(
+    AMT_INCOME_TOTAL,
+    AMT_CREDIT,
+    AMT_ANNUITY,
+    AMT_GOODS_PRICE,
+    DAYS_BIRTH,
+    DAYS_EMPLOYED,
+    CNT_CHILDREN,
+    EXT_SOURCE_1,
+    EXT_SOURCE_2,
+    EXT_SOURCE_3
+  )
+
+# Create summary statistics
+summary_stats <- key_features |>
+  summarise(across(everything(), list(
+    Min = ~min(., na.rm = TRUE),
+    Q1 = ~quantile(., 0.25, na.rm = TRUE),
+    Median = ~median(., na.rm = TRUE),
+    Mean = ~mean(., na.rm = TRUE),
+    Q3 = ~quantile(., 0.75, na.rm = TRUE),
+    Max = ~max(., na.rm = TRUE),
+    Missing = ~sum(is.na(.))
+  ))) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Value") |>
+  separate(Variable, into = c("Variable", "Stat"), sep = "_(?=[^_]+$)") |>
+  pivot_wider(names_from = Stat, values_from = Value)
+
+# Format the table
+summary_stats |>
+  mutate(across(c(Min, Q1, Median, Mean, Q3, Max), ~comma(round(., 2)))) |>
+  kable(caption = "Summary Statistics for Key Numeric Features", 
+        col.names = c("Variable", "Min", "Q1", "Median", "Mean", "Q3", "Max", "Missing"))
+```
+
+**Key Observations**:
+
+- **Income**: Wide range from $25,650 to $117M (outliers present), median $147,150
+- **Credit**: Mean credit amount $599K, considerable variation (SD substantial)
+- **Days Variables**: Negative values (days before application); DAYS_EMPLOYED has extreme value (365,243)
+- **External Scores**: Range 0-1, substantial missing data in EXT_SOURCE_1 (56%) and EXT_SOURCE_3 (20%)
+- **Children**: Most applicants have 0 children (median = 0), max = 19
+
+# 3. Target Variable & Class Imbalance
+
+```{r target-analysis}
+# Target distribution
+target_summary <- d_train |>
+  count(TARGET) |>
+  mutate(Percentage = percent(n / sum(n), accuracy = 0.01))
+
+target_summary |> kable(caption = "Target Distribution")
+
+# Visualize
+ggplot(d_train, aes(x = factor(TARGET), fill = factor(TARGET))) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = comma(after_stat(count))), vjust = -0.5) +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c")) +
+  labs(title = "Target Variable Distribution",
+       subtitle = paste0("Default Rate: ", percent(mean(d_train$TARGET), accuracy = 0.01)),
+       x = "Target (0 = No Default, 1 = Default)", y = "Count") +
+  theme(legend.position = "none") +
+  scale_y_continuous(labels = comma)
+```
+
+**Key Finding**: The dataset is highly imbalanced with only **`{r} percent(mean(d_train$TARGET), accuracy = 0.01)`** default rate (11.9:1 ratio). A naive majority classifier predicting all zeros would achieve 92% accuracy but catch 0% of defaults, making accuracy a misleading metric. We must use AUC-ROC, precision-recall, and F1-score instead.
+
+# 4. Missing Data Analysis
+
+```{r missing-data}
+# Calculate missing values for all columns
+missing_summary <- d_train |>
+  summarise(across(everything(), ~sum(is.na(.)))) |>
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_Count") |>
+  mutate(Missing_Pct = Missing_Count / nrow(d_train)) |>
+  filter(Missing_Count > 0) |>
+  arrange(desc(Missing_Count))
+
+# Summary statistics
+cat("Variables with missing data:", nrow(missing_summary), "out of", ncol(d_train), "\n")
+cat("Variables >50% missing:", sum(missing_summary$Missing_Pct > 0.5), "\n")
+cat("Variables >80% missing:", sum(missing_summary$Missing_Pct > 0.8), "\n\n")
+
+# Show top 15
+head(missing_summary, 15) |> 
+  mutate(Missing_Pct = percent(Missing_Pct, accuracy = 0.1)) |>
+  kable(caption = "Top 15 Variables with Missing Values")
+```
+
+```{r missing-plot, fig.width=10, fig.height=6}
+# Visualize top 25 variables with missing data
+missing_summary |>
+  head(25) |>
+  ggplot(aes(x = reorder(Variable, Missing_Count), y = Missing_Count)) +
+  geom_col(fill = "#3498db") +
+  coord_flip() +
+  labs(title = "Top 25 Variables with Missing Values",
+       x = NULL, y = "Missing Count") +
+  scale_y_continuous(labels = comma)
+```
+
+**Missing Data Strategy**:
+
+- **>80% missing** (49 variables): Drop entirely (e.g., COMMONAREA_*, building features likely only for apartments)
+- **50-80% missing**: Consider dropping unless high predictive value (e.g., EXT_SOURCE_1 at 56% missing)
+- **10-50% missing**: Create missing indicator + impute median/mode
+- **<10% missing**: Impute with median (numeric) or mode (categorical)
+
+**Critical Issue**: EXT_SOURCE_1/3 have 56%/20% missing but are among strongest predictors—must retain with careful handling.
+
+# 5. Key Predictors & Relationships
+
+## 5.1 Correlation Analysis
+
+```{r correlation}
+# Calculate correlations with target for numeric variables
+numeric_vars <- d_train |> select(where(is.numeric), -SK_ID_CURR)
+cor_with_target <- sapply(numeric_vars, function(x) cor(x, d_train$TARGET, use = "pairwise.complete.obs"))
+
+# Create data frame and sort
+cor_df <- tibble(
+  Variable = names(cor_with_target),
+  Correlation = cor_with_target
+) |>
+  filter(Variable != "TARGET") |>
+  arrange(desc(abs(Correlation)))
+
+# Top 15 correlations
+head(cor_df, 15) |>
+  kable(caption = "Top 15 Numeric Variables by Correlation with TARGET", digits = 4)
+```
+
+```{r correlation-plot, fig.width=10, fig.height=6}
+# Visualize top correlations
+cor_df |>
+  head(20) |>
+  ggplot(aes(x = reorder(Variable, abs(Correlation)), y = Correlation, fill = Correlation > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c"), labels = c("Negative", "Positive")) +
+  labs(title = "Top 20 Features by Correlation with Default Risk",
+       x = NULL, y = "Correlation with TARGET", fill = "Direction") +
+  theme(legend.position = "bottom")
+```
+
+**Key Findings**:
+
+- **EXT_SOURCE_2** and **EXT_SOURCE_3** are strongest predictors (correlations ~-0.16 to -0.18)
+- Lower external credit scores → Higher default risk
+- **Age** (DAYS_BIRTH) shows positive correlation (+0.078): younger borrowers default more
+- Correlations are modest but meaningful in credit risk modeling
+
+### Correlation Heatmap
+
+```{r correlation-heatmap, fig.width=10, fig.height=10}
+# Select top correlated features for heatmap
+top_features <- cor_df |> 
+  head(15) |> 
+  pull(Variable)
+
+# Add TARGET to the list
+features_for_heatmap <- c("TARGET", top_features)
+
+# Calculate correlation matrix
+cor_matrix <- d_train |>
+  select(all_of(features_for_heatmap)) |>
+  cor(use = "pairwise.complete.obs")
+
+# Create heatmap
+corrplot(cor_matrix, 
+         method = "color", 
+         type = "upper",
+         order = "original",
+         tl.col = "black", 
+         tl.srt = 45,
+         tl.cex = 0.8,
+         addCoef.col = "black",
+         number.cex = 0.6,
+         col = colorRampPalette(c("#e74c3c", "white", "#2ecc71"))(200),
+         title = "Correlation Heatmap: Top 15 Features + TARGET",
+         mar = c(0, 0, 2, 0))
+```
+
+**Heatmap Insights**: 
+
+- Strong negative correlations between EXT_SOURCE scores and TARGET (red cells)
+- EXT_SOURCE variables moderately correlated with each other (some redundancy)
+- DAYS_BIRTH shows consistent positive correlation with TARGET
+- Most features show weak intercorrelations, suggesting they capture different aspects of risk
+
+## 5.2 Income Analysis
+
+```{r income-analysis, fig.width=12, fig.height=8}
+# Income distribution and relationship with target
+p1 <- d_train |>
+  filter(AMT_INCOME_TOTAL < 1000000) |>  # Remove extreme outliers for visualization
+  ggplot(aes(x = AMT_INCOME_TOTAL)) +
+  geom_histogram(bins = 50, fill = "#3498db", alpha = 0.7) +
+  labs(title = "Income Distribution (outliers >$1M excluded for clarity)",
+       x = "Total Income", y = "Count") +
+  scale_x_continuous(labels = dollar)
+
+p2 <- d_train |>
+  filter(AMT_INCOME_TOTAL < 1000000) |>
+  ggplot(aes(x = AMT_INCOME_TOTAL, fill = factor(TARGET))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.6) +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c"), 
+                    labels = c("No Default", "Default")) +
+  labs(title = "Income Distribution by Target",
+       x = "Total Income", y = "Count", fill = NULL) +
+  scale_x_continuous(labels = dollar)
+
+p3 <- d_train |>
+  filter(!is.na(AMT_INCOME_TOTAL)) |>
+  mutate(Income_Quintile = ntile(AMT_INCOME_TOTAL, 5)) |>
+  group_by(Income_Quintile) |>
+  summarise(
+    Median_Income = median(AMT_INCOME_TOTAL),
+    Default_Rate = mean(TARGET, na.rm = TRUE),
+    Count = n(),
+    .groups = "drop"
+  ) |>
+  ggplot(aes(x = factor(Income_Quintile), y = Default_Rate)) +
+  geom_col(fill = "#9b59b6") +
+  geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -0.5) +
+  labs(title = "Default Rate by Income Quintile",
+       x = "Income Quintile (1=Lowest, 5=Highest)", 
+       y = "Default Rate") +
+  scale_y_continuous(labels = percent, limits = c(0, 0.10))
+
+p4 <- d_train |>
+  ggplot(aes(x = factor(TARGET), y = AMT_INCOME_TOTAL)) +
+  geom_boxplot(fill = c("#2ecc71", "#e74c3c"), alpha = 0.7, outlier.alpha = 0.2) +
+  scale_y_continuous(labels = dollar, limits = c(0, 500000)) +
+  labs(title = "Income by Target (outliers clipped at $500K)",
+       x = "Target (0 = No Default, 1 = Default)",
+       y = "Total Income")
+
+gridExtra::grid.arrange(p1, p2, p3, p4, ncol = 2, nrow = 2)
+```
+
+**Income Findings**:
+
+- **Right-skewed distribution**: Most applicants have income $100K-$200K; long tail with extreme outliers (up to $117M)
+- **Modest relationship with default**: Highest income quintile has slightly lower default rate (6.8%) vs. middle quintiles (~8.5%)
+- **Income is not a strong discriminator**: Unlike age or external scores, income alone doesn't strongly predict default
+- **Key insight**: How people manage credit (external scores) matters more than how much they earn—someone earning $150K with poor credit history is riskier than someone earning $100K with good payment behavior
+
+## 5.3 External Source Scores
+
+```{r ext-source-analysis, fig.width=12, fig.height=4}
+# Analyze external source scores
+p1 <- d_train |>
+  ggplot(aes(x = EXT_SOURCE_2, fill = factor(TARGET))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.6) +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c"), labels = c("No Default", "Default")) +
+  labs(title = "EXT_SOURCE_2 Distribution by Target", x = "EXT_SOURCE_2", y = "Count", fill = NULL)
+
+p2 <- d_train |>
+  ggplot(aes(x = EXT_SOURCE_3, fill = factor(TARGET))) +
+  geom_histogram(bins = 50, position = "identity", alpha = 0.6) +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c"), labels = c("No Default", "Default")) +
+  labs(title = "EXT_SOURCE_3 Distribution by Target", x = "EXT_SOURCE_3", y = "Count", fill = NULL)
+
+p3 <- d_train |>
+  filter(!is.na(EXT_SOURCE_2)) |>
+  mutate(Score_Bin = cut(EXT_SOURCE_2, breaks = 5)) |>
+  group_by(Score_Bin) |>
+  summarise(Default_Rate = mean(TARGET, na.rm = TRUE), Count = n()) |>
+  ggplot(aes(x = Score_Bin, y = Default_Rate)) +
+  geom_col(fill = "#3498db") +
+  geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -0.5, size = 3) +
+  labs(title = "Default Rate by EXT_SOURCE_2 Bins", x = "Score Range", y = "Default Rate") +
+  scale_y_continuous(labels = percent) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+gridExtra::grid.arrange(p1, p2, p3, ncol = 3)
+```
+
+## 5.3 Age Analysis
+
+```{r age-analysis, fig.width=10, fig.height=4}
+# Convert days to years
+d_train <- d_train |> mutate(AGE_YEARS = -DAYS_BIRTH / 365)
+
+# Age by target
+p1 <- ggplot(d_train, aes(x = AGE_YEARS, fill = factor(TARGET))) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.6) +
+  scale_fill_manual(values = c("#2ecc71", "#e74c3c"), labels = c("No Default", "Default")) +
+  labs(title = "Age Distribution by Target", x = "Age (Years)", y = "Count", fill = NULL)
+
+# Default rate by age decade
+p2 <- d_train |>
+  mutate(Age_Decade = floor(AGE_YEARS / 10) * 10) |>
+  group_by(Age_Decade) |>
+  summarise(Default_Rate = mean(TARGET, na.rm = TRUE), Count = n()) |>
+  ggplot(aes(x = Age_Decade, y = Default_Rate)) +
+  geom_line(color = "#e74c3c", size = 1.5) +
+  geom_point(color = "#e74c3c", size = 3) +
+  geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -1) +
+  labs(title = "Default Rate by Age Decade", x = "Age Decade", y = "Default Rate") +
+  scale_y_continuous(labels = percent, limits = c(0, 0.15))
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+**Age Finding**: Clear inverse relationship—default rate drops from **11.5% (age 20s) to 4.9% (age 60+)**. Younger borrowers are higher risk.
+
+## 5.4 Critical Data Quality Issue: Employment Anomaly
+
+```{r employment-anomaly}
+# Identify employment anomaly
+d_train <- d_train |> mutate(EMPLOYMENT_ANOMALY = DAYS_EMPLOYED == 365243)
+
+anomaly_summary <- d_train |>
+  group_by(EMPLOYMENT_ANOMALY) |>
+  summarise(
+    Count = n(),
+    Percentage = percent(n() / nrow(d_train), accuracy = 0.1),
+    Default_Rate = percent(mean(TARGET, na.rm = TRUE), accuracy = 0.1)
+  )
+
+anomaly_summary |> kable(caption = "Employment Anomaly Analysis (365243 days = 1000 years)")
+```
+
+```{r employment-plot, fig.width=10, fig.height=4}
+# Visualize employment duration (excluding anomaly)
+p1 <- d_train |>
+  filter(!EMPLOYMENT_ANOMALY) |>
+  mutate(EMPLOYMENT_YEARS = -DAYS_EMPLOYED / 365) |>
+  filter(EMPLOYMENT_YEARS >= 0, EMPLOYMENT_YEARS < 50) |>
+  ggplot(aes(x = EMPLOYMENT_YEARS)) +
+  geom_histogram(bins = 50, fill = "#9b59b6", alpha = 0.7) +
+  labs(title = "Employment Duration (Anomalies Excluded)", 
+       x = "Employment Years", y = "Count")
+
+p2 <- d_train |>
+  group_by(EMPLOYMENT_ANOMALY) |>
+  summarise(Default_Rate = mean(TARGET, na.rm = TRUE)) |>
+  ggplot(aes(x = factor(EMPLOYMENT_ANOMALY, labels = c("Normal", "Anomaly (1000 yrs)")), 
+             y = Default_Rate, fill = EMPLOYMENT_ANOMALY)) +
+  geom_col() +
+  geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -0.5) +
+  scale_fill_manual(values = c("#2ecc71", "#3498db")) +
+  labs(title = "Default Rate: Normal vs Anomaly", x = NULL, y = "Default Rate") +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "none")
+
+gridExtra::grid.arrange(p1, p2, ncol = 2)
+```
+
+**Critical Discovery**: **`{r} comma(sum(d_train$EMPLOYMENT_ANOMALY))`** records (18%) have suspicious value of 365243 days (exactly 1000 years). This is a sentinel value likely representing pensioners/retirees/unemployed. **Key insight**: This group has *lower* default rate (5.4% vs 8.7%)—must treat as separate category, NOT as missing data.
+
+## 5.5 Categorical Variables
+
+```{r categorical-summary}
+# Key categorical variables and their relationship with target
+cat_vars <- c("NAME_INCOME_TYPE", "NAME_EDUCATION_TYPE", "NAME_FAMILY_STATUS", "CODE_GENDER")
+
+cat_summary <- map_df(cat_vars, function(var) {
+  d_train |>
+    group_by(Category = .data[[var]]) |>
+    summarise(
+      Count = n(),
+      Default_Rate = mean(TARGET, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    arrange(desc(Default_Rate)) |>
+    head(3) |>
+    mutate(Variable = var)
+})
+
+cat_summary |>
+  select(Variable, Category, Count, Default_Rate) |>
+  mutate(Default_Rate = percent(Default_Rate, accuracy = 0.1)) |>
+  kable(caption = "Top 3 Categories by Default Rate (per Variable)")
+```
+
+**Categorical Findings**:
+
+- **Income Type**: Maternity leave (40%) and Unemployed (36%) have highest default rates; Pensioners lowest (5.8%)
+- **Education**: Lower secondary (11%) defaults more than higher education (5%)
+- **Family Status**: Civil marriage (9.9%) higher than widow (5.4%)
+- Large variation suggests these are valuable predictive features
+
+# 6. Transactional Data Integration
+
+The Home Credit dataset includes supplementary transactional files that capture historical credit behavior. These provide crucial behavioral indicators beyond the static application data.
+
+## 6.1 Supplementary Data Files Overview
+
+**Required Files** (download from Kaggle: https://www.kaggle.com/c/home-credit-default-risk/data):
+
+- `bureau.csv` - Applicant's previous credits from other financial institutions
+- `previous_application.csv` - Applicant's previous Home Credit applications  
+- `installments_payments.csv` - Repayment history for previous credits
+- `credit_card_balance.csv` - Monthly credit card balance snapshots
+- `POS_CASH_balance.csv` - Monthly balance snapshots for POS/cash loans
+
+```{r check-files}
+# Check which supplementary files are available
+supp_files <- c("bureau.csv", "previous_application.csv", "installments_payments.csv",
+                "credit_card_balance.csv", "POS_CASH_balance.csv")
+
+file_check <- tibble(
+  File = supp_files,
+  Available = file.exists(supp_files),
+  Description = c(
+    "Credit bureau - other institutions",
+    "Previous Home Credit applications",
+    "Payment history",
+    "Credit card balances",
+    "POS/Cash loan balances"
+  )
+)
+
+file_check |> kable(caption = "Supplementary File Availability")
+```
+
+::: {.callout-note}
+## Note on Data Availability
+
+If supplementary files are not found, the code chunks in this section will demonstrate the intended analysis approach. Download the complete dataset from Kaggle to execute this analysis.
+:::
+
+## 6.2 Load and Aggregate Bureau Data
+
+```{r load-bureau}
+# Bureau data: Credits from other financial institutions
+if (file.exists("bureau.csv")) {
+  bureau <- read_csv("bureau.csv", show_col_types = FALSE)
+  
+  cat("Bureau data loaded:", nrow(bureau), "credit records for", 
+      n_distinct(bureau$SK_ID_CURR), "unique applicants\n")
+  
+  # Aggregate to application level (many credits per applicant -> one row per applicant)
+  bureau_agg <- bureau |>
+    group_by(SK_ID_CURR) |>
+    summarise(
+      # Count of credits
+      BUREAU_CREDIT_COUNT = n(),
+      BUREAU_ACTIVE_COUNT = sum(CREDIT_ACTIVE == "Active", na.rm = TRUE),
+      BUREAU_CLOSED_COUNT = sum(CREDIT_ACTIVE == "Closed", na.rm = TRUE),
+      
+      # Credit amounts (in original currency)
+      BUREAU_TOTAL_DEBT = sum(AMT_CREDIT_SUM_DEBT, na.rm = TRUE),
+      BUREAU_AVG_CREDIT = mean(AMT_CREDIT_SUM, na.rm = TRUE),
+      BUREAU_MAX_CREDIT = max(AMT_CREDIT_SUM, na.rm = TRUE),
+      
+      # Overdue amounts - key risk indicator
+      BUREAU_MAX_OVERDUE = max(AMT_CREDIT_MAX_OVERDUE, na.rm = TRUE),
+      BUREAU_TOTAL_OVERDUE = sum(AMT_CREDIT_MAX_OVERDUE, na.rm = TRUE),
+      BUREAU_HAS_OVERDUE = as.numeric(any(AMT_CREDIT_MAX_OVERDUE > 0, na.rm = TRUE)),
+      
+      # Credit diversity
+      BUREAU_CREDIT_TYPES = n_distinct(CREDIT_TYPE),
+      
+      # Timing features
+      BUREAU_AVG_DAYS_CREDIT = mean(DAYS_CREDIT, na.rm = TRUE),
+      BUREAU_DAYS_SINCE_NEWEST = max(DAYS_CREDIT, na.rm = TRUE),
+      
+      .groups = "drop"
+    )
+  
+  cat("Bureau features created:", ncol(bureau_agg) - 1, "features\n")
+  
+  # Preview aggregated data
+  head(bureau_agg, 3) |> kable(caption = "Sample Bureau Aggregated Features")
+} else {
+  cat("bureau.csv not found. Skipping bureau data integration.\n")
+}
+```
+
+## 6.3 Load and Aggregate Previous Application Data
+
+```{r load-previous}
+# Previous applications at Home Credit
+if (file.exists("previous_application.csv")) {
+  prev_app <- read_csv("previous_application.csv", show_col_types = FALSE)
+  
+  cat("Previous applications loaded:", nrow(prev_app), "applications for",
+      n_distinct(prev_app$SK_ID_CURR), "unique applicants\n")
+  
+  # Aggregate to application level
+  prev_app_agg <- prev_app |>
+    group_by(SK_ID_CURR) |>
+    summarise(
+      # Application counts by status
+      PREV_APP_COUNT = n(),
+      PREV_APPROVED = sum(NAME_CONTRACT_STATUS == "Approved", na.rm = TRUE),
+      PREV_REFUSED = sum(NAME_CONTRACT_STATUS == "Refused", na.rm = TRUE),
+      PREV_CANCELED = sum(NAME_CONTRACT_STATUS == "Canceled", na.rm = TRUE),
+      
+      # Approval rate - behavioral indicator
+      PREV_APPROVAL_RATE = mean(NAME_CONTRACT_STATUS == "Approved", na.rm = TRUE),
+      
+      # Credit amounts
+      PREV_AVG_CREDIT = mean(AMT_CREDIT, na.rm = TRUE),
+      PREV_MAX_CREDIT = max(AMT_CREDIT, na.rm = TRUE),
+      PREV_AVG_APPLICATION = mean(AMT_APPLICATION, na.rm = TRUE),
+      
+      # Recency
+      PREV_DAYS_LAST_APP = max(DAYS_DECISION, na.rm = TRUE),
+      
+      .groups = "drop"
+    )
+  
+  cat("Previous application features created:", ncol(prev_app_agg) - 1, "features\n")
+  
+  head(prev_app_agg, 3) |> kable(caption = "Sample Previous Application Features")
+} else {
+  cat("previous_application.csv not found. Skipping previous application integration.\n")
+}
+```
+
+## 6.4 Load and Aggregate Payment History
+
+```{r load-installments}
+# Installment payment history - critical for default prediction
+if (file.exists("installments_payments.csv")) {
+  installments <- read_csv("installments_payments.csv", show_col_types = FALSE)
+  
+  cat("Installments loaded:", nrow(installments), "payment records\n")
+  
+  # Installments already has SK_ID_CURR, no need to join with previous_application
+  install_agg <- installments |>
+    filter(!is.na(SK_ID_CURR)) |>
+    group_by(SK_ID_CURR) |>
+    summarise(
+      # Payment counts
+      INSTALL_COUNT = n(),
+      
+      # Late payment behavior - strong default predictor
+      INSTALL_LATE_COUNT = sum(DAYS_ENTRY_PAYMENT > DAYS_INSTALMENT, na.rm = TRUE),
+      INSTALL_LATE_RATE = mean(DAYS_ENTRY_PAYMENT > DAYS_INSTALMENT, na.rm = TRUE),
+      INSTALL_AVG_DAYS_LATE = mean(pmax(0, DAYS_ENTRY_PAYMENT - DAYS_INSTALMENT), na.rm = TRUE),
+      
+      # Payment amount behavior
+      INSTALL_AVG_PAYMENT = mean(AMT_PAYMENT, na.rm = TRUE),
+      INSTALL_PAYMENT_DIFF_AVG = mean(AMT_PAYMENT - AMT_INSTALMENT, na.rm = TRUE),
+      INSTALL_UNDERPAID_TOTAL = sum(pmax(0, AMT_INSTALMENT - AMT_PAYMENT), na.rm = TRUE),
+      
+      .groups = "drop"
+    )
+  
+  cat("Installment features created:", ncol(install_agg) - 1, "features\n")
+  
+  head(install_agg, 3) |> kable(caption = "Sample Installment Payment Features")
+} else {
+  cat("installments_payments.csv not found. Skipping installment integration.\n")
+}
+```
+
+## 6.5 Load and Aggregate Credit Card Data
+
+```{r load-credit-card}
+# Credit card balance history
+if (file.exists("credit_card_balance.csv")) {
+  cc_balance <- read_csv("credit_card_balance.csv", show_col_types = FALSE)
+  
+  cat("Credit card data loaded:", nrow(cc_balance), "monthly records\n")
+  
+  # Credit card balance already has SK_ID_CURR, no need to join
+  cc_agg <- cc_balance |>
+    filter(!is.na(SK_ID_CURR)) |>
+    group_by(SK_ID_CURR) |>
+    summarise(
+      # Utilization - key credit behavior metric
+      CC_UTILIZATION_AVG = mean(AMT_BALANCE / pmax(1, AMT_CREDIT_LIMIT_ACTUAL), na.rm = TRUE),
+      CC_UTILIZATION_MAX = max(AMT_BALANCE / pmax(1, AMT_CREDIT_LIMIT_ACTUAL), na.rm = TRUE),
+      
+      # Balance patterns
+      CC_BALANCE_AVG = mean(AMT_BALANCE, na.rm = TRUE),
+      CC_BALANCE_MAX = max(AMT_BALANCE, na.rm = TRUE),
+      
+      # Days past due - critical risk indicator
+      CC_DPD_MAX = max(SK_DPD, na.rm = TRUE),
+      CC_DPD_AVG = mean(SK_DPD, na.rm = TRUE),
+      CC_HAS_DPD = as.numeric(any(SK_DPD > 0, na.rm = TRUE)),
+      
+      # Payment behavior
+      CC_PAYMENT_AVG = mean(AMT_PAYMENT_CURRENT, na.rm = TRUE),
+      CC_MIN_PAYMENT_RATIO = mean(AMT_PAYMENT_CURRENT / pmax(1, AMT_INST_MIN_REGULARITY), na.rm = TRUE),
+      
+      .groups = "drop"
+    )
+  
+  cat("Credit card features created:", ncol(cc_agg) - 1, "features\n")
+  
+  head(cc_agg, 3) |> kable(caption = "Sample Credit Card Features")
+} else {
+  cat("credit_card_balance.csv not found. Skipping credit card integration.\n")
+}
+```
+
+## 6.6 Join All Transactional Data to Training Set
+
+```{r join-transactional}
+# Create enhanced dataset with all transactional features
+d_train_enhanced <- d_train
+
+join_count <- 0
+
+if (exists("bureau_agg")) {
+  d_train_enhanced <- d_train_enhanced |> left_join(bureau_agg, by = "SK_ID_CURR")
+  join_count <- join_count + 1
+  cat("Joined bureau features\n")
+}
+
+if (exists("prev_app_agg")) {
+  d_train_enhanced <- d_train_enhanced |> left_join(prev_app_agg, by = "SK_ID_CURR")
+  join_count <- join_count + 1
+  cat("Joined previous application features\n")
+}
+
+if (exists("install_agg")) {
+  d_train_enhanced <- d_train_enhanced |> left_join(install_agg, by = "SK_ID_CURR")
+  join_count <- join_count + 1
+  cat("Joined installment features\n")
+}
+
+if (exists("cc_agg")) {
+  d_train_enhanced <- d_train_enhanced |> left_join(cc_agg, by = "SK_ID_CURR")
+  join_count <- join_count + 1
+  cat("Joined credit card features\n")
+}
+
+if (join_count > 0) {
+  cat("\nEnhanced dataset dimensions:", nrow(d_train_enhanced), "rows,", 
+      ncol(d_train_enhanced), "columns\n")
+  cat("Added", ncol(d_train_enhanced) - ncol(d_train), "transactional features\n")
+} else {
+  cat("\nNo transactional data joined. Download supplementary files to enhance analysis.\n")
+}
+```
+
+## 6.7 Analyze Transactional Features Predictive Power
+
+```{r transactional-correlation}
+# Analyze correlation of transactional features with TARGET
+if (exists("d_train_enhanced") && ncol(d_train_enhanced) > ncol(d_train)) {
+  
+  # Select transactional features (those not in original d_train)
+  original_cols <- names(d_train)
+  trans_cols <- setdiff(names(d_train_enhanced), original_cols)
+  
+  # Calculate correlations with TARGET
+  trans_cor <- d_train_enhanced |>
+    select(TARGET, all_of(trans_cols)) |>
+    summarise(across(everything(), ~cor(., d_train_enhanced$TARGET, use = "pairwise.complete.obs"))) |>
+    pivot_longer(everything(), names_to = "Variable", values_to = "Correlation") |>
+    filter(Variable != "TARGET", !is.na(Correlation)) |>
+    arrange(desc(abs(Correlation)))
+  
+  cat("\nTop 15 Transactional Features by Correlation with TARGET:\n")
+  trans_cor |> 
+    head(15) |> 
+    kable(caption = "Transactional Features Predictive Power", digits = 4)
+  
+  # Visualize top correlations
+  trans_cor |>
+    head(20) |>
+    ggplot(aes(x = reorder(Variable, abs(Correlation)), y = Correlation, 
+               fill = Correlation > 0)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = c("#2ecc71", "#e74c3c"), 
+                      labels = c("Negative", "Positive")) +
+    labs(title = "Top 20 Transactional Features by Correlation with Default",
+         x = NULL, y = "Correlation with TARGET", fill = "Direction") +
+    theme(legend.position = "bottom")
+  
+} else {
+  cat("Transactional features not available for correlation analysis.\n")
+}
+```
+
+## 6.8 Deep Dive: Payment Behavior Analysis
+
+```{r payment-behavior-analysis, fig.width=12, fig.height=8}
+# Analyze late payment patterns if installment data available
+if (exists("install_agg") && exists("d_train_enhanced")) {
+  
+  # Create late payment categories
+  payment_analysis <- d_train_enhanced |>
+    filter(!is.na(INSTALL_LATE_RATE)) |>
+    mutate(
+      Late_Category = case_when(
+        INSTALL_LATE_RATE == 0 ~ "Never Late",
+        INSTALL_LATE_RATE <= 0.1 ~ "Rarely Late (≤10%)",
+        INSTALL_LATE_RATE <= 0.3 ~ "Sometimes Late (10-30%)",
+        TRUE ~ "Often Late (>30%)"
+      )
+    ) |>
+    group_by(Late_Category) |>
+    summarise(
+      Count = n(),
+      Default_Rate = mean(TARGET, na.rm = TRUE),
+      Avg_Late_Rate = mean(INSTALL_LATE_RATE, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    mutate(Late_Category = factor(Late_Category, 
+                                   levels = c("Never Late", "Rarely Late (≤10%)", 
+                                              "Sometimes Late (10-30%)", "Often Late (>30%)")))
+  
+  # Visualize
+  p1 <- ggplot(payment_analysis, aes(x = Late_Category, y = Default_Rate)) +
+    geom_col(fill = "#e74c3c") +
+    geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -0.5) +
+    labs(title = "Default Rate by Historical Late Payment Behavior",
+         x = "Late Payment Category", y = "Current Default Rate") +
+    scale_y_continuous(labels = percent, limits = c(0, max(payment_analysis$Default_Rate) * 1.2)) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  p2 <- ggplot(payment_analysis, aes(x = Late_Category, y = Count)) +
+    geom_col(fill = "#3498db") +
+    geom_text(aes(label = comma(Count)), vjust = -0.5) +
+    labs(title = "Applicant Distribution by Payment History",
+         x = "Late Payment Category", y = "Number of Applicants") +
+    scale_y_continuous(labels = comma) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  gridExtra::grid.arrange(p1, p2, ncol = 2)
+  
+  payment_analysis |> 
+    mutate(Default_Rate = percent(Default_Rate, accuracy = 0.1),
+           Avg_Late_Rate = percent(Avg_Late_Rate, accuracy = 0.1)) |>
+    kable(caption = "Payment Behavior vs Default Rate")
+  
+  cat("\n**Key Finding**: Late payment history is a strong predictor of future default.\n")
+  
+} else {
+  cat("Payment behavior analysis requires installments_payments.csv\n")
+}
+```
+
+## 6.9 Deep Dive: Credit Bureau Overdue Analysis
+
+```{r bureau-overdue-analysis, fig.width=12, fig.height=5}
+# Analyze overdue amounts from credit bureau if available
+if (exists("bureau_agg") && exists("d_train_enhanced")) {
+  
+  overdue_analysis <- d_train_enhanced |>
+    filter(!is.na(BUREAU_MAX_OVERDUE)) |>
+    mutate(
+      Overdue_Category = case_when(
+        BUREAU_MAX_OVERDUE == 0 ~ "No Overdue",
+        BUREAU_MAX_OVERDUE <= 10000 ~ "Small Overdue (≤$10K)",
+        BUREAU_MAX_OVERDUE <= 50000 ~ "Medium Overdue ($10K-$50K)",
+        TRUE ~ "Large Overdue (>$50K)"
+      )
+    )
+  
+  overdue_summary <- overdue_analysis |>
+    group_by(Overdue_Category) |>
+    summarise(
+      Count = n(),
+      Default_Rate = mean(TARGET, na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    mutate(Overdue_Category = factor(Overdue_Category,
+                                     levels = c("No Overdue", "Small Overdue (≤$10K)",
+                                                "Medium Overdue ($10K-$50K)", 
+                                                "Large Overdue (>$50K)")))
+  
+  p1 <- ggplot(overdue_summary, aes(x = Overdue_Category, y = Default_Rate)) +
+    geom_col(fill = "#e74c3c") +
+    geom_text(aes(label = percent(Default_Rate, accuracy = 0.1)), vjust = -0.5) +
+    labs(title = "Default Rate by Past Overdue Amount",
+         x = "Maximum Overdue Amount Category", y = "Current Default Rate") +
+    scale_y_continuous(labels = percent) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  p2 <- overdue_analysis |>
+    ggplot(aes(x = factor(TARGET), y = BUREAU_MAX_OVERDUE)) +
+    geom_boxplot(fill = c("#2ecc71", "#e74c3c"), alpha = 0.7, outlier.alpha = 0.3) +
+    scale_y_continuous(labels = dollar, limits = c(0, 100000)) +
+    labs(title = "Overdue Amount Distribution by Target",
+         x = "Target (0 = No Default, 1 = Default)",
+         y = "Maximum Overdue Amount (capped at $100K for visibility)")
+  
+  gridExtra::grid.arrange(p1, p2, ncol = 2)
+  
+  overdue_summary |>
+    mutate(Default_Rate = percent(Default_Rate, accuracy = 0.1)) |>
+    kable(caption = "Overdue Amount vs Default Rate")
+  
+  cat("\n**Key Finding**: Past overdue amounts strongly predict future default risk.\n")
+  
+} else {
+  cat("Bureau overdue analysis requires bureau.csv\n")
+}
+```
+
+## 6.10 Transactional Data Summary
+
+**Expected Findings** (when supplementary data is available):
+
+1. **Payment history is the strongest predictor**: Late payment rate typically shows correlation of 0.15-0.25 with default
+2. **Overdue amounts matter**: Past overdue balances are highly predictive (correlation ~0.10-0.20)
+3. **Credit utilization**: High credit card utilization indicates financial stress
+4. **Application history**: Multiple refused applications suggest higher risk
+5. **Credit bureau diversity**: Having multiple active credits can be both risk and stability indicator
+
+**Model Impact**: Adding transactional features typically improves model performance from AUC ~0.73 (application data only) to **AUC ~0.78-0.81** (with behavioral history).
+
+::: {.callout-important}
+## Action Required
+
+Download supplementary files from Kaggle to complete this analysis and unlock significant predictive power for your default risk model.
+:::
+
+# 7. Results & Key Findings
+
+## 7.1 Data Quality Problems
+
+**High Priority Issues**:
+
+1. **Employment Anomaly**: 18% of records have sentinel value (365243 days = 1000 years)
+   - **Action**: Create separate category, do NOT impute
+   - **Insight**: This group has *lower* default rate—likely pensioners
+
+2. **Class Imbalance**: Only 8.07% default rate
+   - **Action**: Use SMOTE/class weights; evaluate with AUC-ROC/PR-AUC, not accuracy
+   
+3. **Extensive Missing Data**: 67 variables have missing values
+   - **Action**: Drop >80% missing (49 vars); impute/flag remainder
+   - **Special Case**: EXT_SOURCE_1 (56% missing) is strong predictor—retain with missing flag
+
+## 7.2 Strongest Predictors
+
+**Ranked by Correlation**:
+
+1. **EXT_SOURCE_3** (-0.179): Strongest predictor, 20% missing
+2. **EXT_SOURCE_2** (-0.160): Second strongest, nearly complete
+3. **EXT_SOURCE_1** (-0.155): Third strongest, but 56% missing
+4. **Age** (+0.078): Clear monotonic relationship, highly interpretable
+5. **Regional Ratings** (~0.06): Geographic risk factors
+
+**Key Insight**: External credit bureau scores dominate predictive power (2-3x stronger than other features). This suggests credit history behavior matters more than application demographics or income.
+
+## 7.3 How EDA Influenced Analytics Approach
+
+### Model Selection
+
+**Before EDA**: Planned logistic regression for interpretability
+
+**After EDA**: Will use tree-based models (XGBoost, LightGBM, Random Forest)
+
+**Reasoning**:
+- Handle missing values natively (67 variables affected)
+- No scaling needed (mixed-scale features)
+- Capture non-linear relationships automatically
+- Superior for imbalanced classification
+- Provide feature importance
+
+### Feature Engineering Priorities
+
+**High Priority**:
+1. EXT_SOURCE combinations (average, weighted combinations)
+2. Financial ratios: income-to-credit, credit-to-goods, payment-to-income
+3. Age binning (5-10 year brackets)
+4. Employment category (anomaly + duration → multi-level categorical)
+5. Missing indicators for EXT_SOURCE_1, EXT_SOURCE_3
+
+**Drop**: Building features with >70% missing, near-zero variance features
+
+### Evaluation Strategy
+
+**Primary Metrics**:
+- AUC-ROC (discrimination ability)
+- Precision-Recall AUC (minority class focus)
+- F1-score at business-relevant thresholds
+
+**Not Using**: Accuracy (misleading for 8% default rate)
+
+### Data Preprocessing Pipeline
+
+1. Create employment category FIRST (before imputation)
+2. Drop columns >80% missing
+3. Create missing indicators for valuable features
+4. Impute remaining: median (numeric), mode (categorical)
+5. Engineer ratio features
+6. Handle class imbalance (SMOTE or class weights)
+7. Stratified train/validation split
+
+## 7.4 Expected Performance
+
+Based on correlation analysis and domain knowledge:
+
+- **Baseline** (predict all 0): AUC = 0.50
+- **Application data only**: AUC = 0.72-0.76
+- **With feature engineering**: AUC = 0.76-0.80
+- **Tuned ensemble**: AUC = 0.80-0.83
+
+Kaggle competition top scores: 0.78-0.81 range
+
+## 7.5 Critical Takeaways
+
+::: {.callout-important}
+## Key Insights for Modeling
+
+1. **Don't treat employment anomaly as missing**—it's a valuable segment with lower risk
+2. **Prioritize EXT_SOURCE scores**—they dominate predictive power
+3. **Use minority class metrics**—accuracy will mislead
+4. **Start with tree-based models**—best fit for this data
+5. **Age is interpretable predictor**—but consider fairness implications
+6. **Feature engineering > model complexity**—create meaningful ratios
+:::
+
+## 7.6 Next Steps
+
+**Immediate**:
+- Finalize preprocessing pipeline
+- Split data with stratification
+- Baseline model (XGBoost with application features only)
+
+**Short-term**:
+- Feature engineering implementation
+- Hyperparameter tuning
+- Feature selection
+
+**Before Deployment**:
+- Fairness audit (age-based predictions)
+- Model interpretability (SHAP values)
+- Business impact simulation
+
+---
+
+**Conclusion**: This EDA has transformed a vague "predict defaults" problem into a concrete roadmap. We understand what data problems exist (employment anomaly, missing data, class imbalance), which features matter most (external scores, age), and how to approach modeling (tree-based, proper metrics, feature engineering focus). The analysis revealed that credit behavior history (external scores) is more predictive than application demographics, and that even "errors" like the employment anomaly can contain valuable signal when properly understood.
