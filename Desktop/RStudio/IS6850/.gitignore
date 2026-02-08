@@ -1,0 +1,29 @@
+# Data files (too large for Git)
+*.csv
+*.zip
+*.7z
+*.tar.gz
+
+# R files
+.Rhistory
+.RData
+.Rproj.user
+*.Rproj
+
+# Python files
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Keep documentation
+!README*.md
+!QUICK_REFERENCE.md
